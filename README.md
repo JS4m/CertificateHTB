@@ -6,8 +6,7 @@
 - **Sistema Operativo**: Windows Server 2019 (Domain Controller)
 - **Dificultad**: Media
 - **Servicios principales**: IIS, Active Directory, Certificate Services
-- **Flags**: Usuario y Root (reemplazadas con ****)
-
+- **Flags**: Usuario y Root  
 ## Índice Completo
 1. [Preparación del Entorno](#1-preparación-del-entorno)
 2. [Reconocimiento y Enumeración Inicial](#2-reconocimiento-y-enumeración-inicial)
