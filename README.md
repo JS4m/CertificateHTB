@@ -1,4 +1,4 @@
-# Certificate HTB - Write-up Completo y Detallado para Principiantes
+# Certificate HTB - Write-up Completo y Detallado Avanzado.
 
 ## Información de la Máquina
 - **IP**: 10.10.11.71
